@@ -1,0 +1,168 @@
+"""Trimmed SonomaApiStore copy for automations workflows."""
+
+from __future__ import annotations
+
+import os
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+class SonomaApiStore:
+    def __init__(self, db_path: Path | None = None):
+        default_db = Path(os.environ.get("RAPHAEL_AUTOMATION_DB", "/tmp/raphael-automation.db"))
+        self.db_path = db_path or default_db
+        self._init_db()
+        self._seed_defaults()
+
+    def _conn(self) -> sqlite3.Connection:
+        return sqlite3.connect(self.db_path)
+
+    def _init_db(self) -> None:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._conn() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS automations (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    trigger_type TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    last_run_status TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS automation_runs (
+                    id TEXT PRIMARY KEY,
+                    automation_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    trigger TEXT NOT NULL,
+                    duration_ms INTEGER,
+                    started_at TEXT NOT NULL,
+                    error TEXT
+                )
+                """
+            )
+
+    def _seed_defaults(self) -> None:
+        with self._conn() as conn:
+            auto_count = conn.execute("SELECT COUNT(*) FROM automations").fetchone()[0]
+            if auto_count == 0:
+                now = _utc_now()
+                conn.executemany(
+                    """
+                    INSERT INTO automations (id, name, trigger_type, action, enabled, last_run_status, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            "auto-drc",
+                            "DRC on commit",
+                            "on_commit",
+                            "Run DRC + net connectivity check",
+                            1,
+                            "succeeded",
+                            now,
+                        ),
+                        (
+                            "auto-release",
+                            "Release export on merge",
+                            "on_merge",
+                            "Export Gerber + BOM to release bucket",
+                            1,
+                            "succeeded",
+                            now,
+                        ),
+                        (
+                            "auto-eol",
+                            "EOL component monitor",
+                            "scheduled",
+                            "Scan BOM for EOL parts (weekly)",
+                            1,
+                            "running",
+                            now,
+                        ),
+                    ],
+                )
+                conn.executemany(
+                    """
+                    INSERT INTO automation_runs (id, automation_id, name, status, trigger, duration_ms, started_at, error)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        ("run-1", "auto-drc", "DRC: USB-PD input", "succeeded", "On commit", 245000, now, None),
+                        ("run-2", "auto-release", "Gerber export: v2.3", "succeeded", "On merge", 364000, now, None),
+                        ("run-3", "auto-eol", "EOL scan: power-board-v2", "running", "Scheduled", None, now, None),
+                    ],
+                )
+
+    def create_automation(self, name: str, trigger_type: str, action: str) -> dict[str, Any]:
+        auto_id = f"auto-{name.lower().replace(' ', '-')[:24]}-{int(datetime.now(timezone.utc).timestamp()) % 100000}"
+        now = _utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO automations (id, name, trigger_type, action, enabled, last_run_status, created_at)
+                VALUES (?, ?, ?, ?, 1, NULL, ?)
+                """,
+                (auto_id, name, trigger_type, action, now),
+            )
+        items = self.list_automations()
+        return next((a for a in items if a["id"] == auto_id), {})
+
+    def list_automations(self) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id, name, trigger_type, action, enabled, last_run_status, created_at FROM automations ORDER BY created_at"
+            ).fetchall()
+        return [
+            {
+                "id": r[0],
+                "name": r[1],
+                "trigger_type": r[2],
+                "action": r[3],
+                "enabled": bool(r[4]),
+                "last_run_status": r[5],
+                "created_at": r[6],
+            }
+            for r in rows
+        ]
+
+    def patch_automation(self, automation_id: str, enabled: bool) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            conn.execute("UPDATE automations SET enabled = ? WHERE id = ?", (1 if enabled else 0, automation_id))
+        items = self.list_automations()
+        return next((a for a in items if a["id"] == automation_id), None)
+
+    def list_automation_runs(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, automation_id, name, status, trigger, duration_ms, started_at, error
+                FROM automation_runs ORDER BY started_at DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "id": r[0],
+                "automation_id": r[1],
+                "name": r[2],
+                "status": r[3],
+                "trigger": r[4],
+                "duration_ms": r[5],
+                "started_at": r[6],
+                "error": r[7],
+            }
+            for r in rows
+        ]

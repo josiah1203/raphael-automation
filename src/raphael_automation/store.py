@@ -44,6 +44,27 @@ class AutomationsStore:
                 );
                 """
             )
+            self._seed()
+
+    def _seed(self) -> None:
+        if self.list_automations():
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        with self._conn() as conn:
+            conn.executemany(
+                "INSERT INTO automations (id, name, trigger_type, action, enabled, last_run_status, created_at) VALUES (?, ?, ?, ?, 1, 'succeeded', ?)",
+                [
+                    ("auto-drc", "DRC on commit", "on_commit", "Run DRC + net connectivity check", now),
+                    ("auto-release", "Release export on merge", "on_merge", "Export Gerber + BOM", now),
+                ],
+            )
+            conn.executemany(
+                "INSERT INTO automation_runs (id, automation_id, name, status, trigger, duration_ms, started_at, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    ("run-1", "auto-drc", "DRC: USB-PD input", "succeeded", "On commit", 245000, now, None),
+                    ("run-2", "auto-release", "Gerber export: v2.3", "succeeded", "On merge", 364000, now, None),
+                ],
+            )
 
     def list_automations(self) -> list[dict[str, Any]]:
         with self._conn() as conn:

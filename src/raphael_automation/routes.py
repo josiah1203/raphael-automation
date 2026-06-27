@@ -8,6 +8,8 @@ from fastapi import APIRouter, HTTPException
 
 from raphael_automation.sonoma_store import SonomaApiStore
 
+from raphael_automation.event_bus import dispatch_automation
+
 router = APIRouter(tags=["automation"])
 _store = SonomaApiStore()
 
@@ -33,3 +35,12 @@ def toggle(automation_id: str, body: dict[str, Any]) -> dict[str, Any]:
     if not result:
         raise HTTPException(404, detail="not_found")
     return result
+
+
+@router.post("/{automation_id}/trigger")
+def trigger(automation_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    auto = _store.get_automation(automation_id)
+    if not auto:
+        raise HTTPException(404, detail="not_found")
+    run = dispatch_automation(auto, auto.get("trigger_type", "manual"), body or {})
+    return {"status": "triggered", "run": run, "automation": auto}
